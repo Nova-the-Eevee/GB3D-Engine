@@ -1,0 +1,2 @@
+# Only needed for importing custom 32x32 player/NPC images in the editor.
+Pillow>=10
