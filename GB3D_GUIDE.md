@@ -1,4 +1,4 @@
-# GB3D Studio 1.0 User Guide
+# GB3D Studio 1.2 User Guide
 
 GB3D Studio is a small scene editor and exporter for making real-time 3D Game Boy Color projects with GBDK. The editor gives you a comfortable full-resolution PC viewport while a corner preview shows the deliberately chunky renderer that the GBC actually uses.
 
@@ -136,7 +136,7 @@ Other viewport toggles:
 
 The Game Boy Color has no normal framebuffer suitable for this kind of 3D engine. GB3D therefore renders at 40 x 36 logical pixels. Every logical pixel corresponds to a 4 x 4 block on the LCD, and groups of four logical pixels are encoded into reusable 8 x 8 background tiles.
 
-That is great for the GBC, but unpleasant for editing a level. Studio 1.0 therefore has two different preview paths:
+That is great for the GBC, but unpleasant for editing a level. Studio 1.2 therefore has two different preview paths:
 
 ### Editor viewport
 
@@ -441,3 +441,20 @@ For your first complete game, keep it intentionally tiny:
 9. Turn on the profiler if it is slow.
 
 Once that works, expand the level gradually. On the GBC, every triangle you do not need is a tiny gift to the CPU.
+
+
+## Studio 1.2 performance options
+
+Studio 1.2 replaces the broken 1.1 paired-row experiment with the stable packed-tile coverage rules plus exact quotient/remainder DDA edge walking. It also keeps native-stride CGB GDMA uploads, adds table-based fast multiplication, global triangle depth buckets, static sector rejection, Solid-only collision scans, and direct shadow-OAM position updates.
+
+For normal play/export, leave **Profiler build (START+SELECT)** OFF. That compiles the profiler out. To measure a scene, enable it before export and hold START + SELECT in the ROM. The profiler uses the hardware Window and shows three readable rows:
+
+```text
+Fxxxx  Rxxxx
+Uxxxx  Txxxx
+Sxxxx  Pxxxx
+```
+
+`F` is total CPU work before VBlank, `R` is 3D scene work, `U` is framebuffer/UI VRAM upload, `T` is triangles submitted, `S` is scripts, and `P` is player physics/camera.
+
+For a platformer with locked camera yaw/pitch, also try **Fixed Camera Fast Path**. The exporter now bakes every immutable object's full transform into 16-bit world vertices, and with this option enabled it folds the locked camera rotation into those vertices too. Scripted moving/rotating objects are still allowed: they automatically use the general runtime transform path. Only scripts that change the locked camera orientation are incompatible.

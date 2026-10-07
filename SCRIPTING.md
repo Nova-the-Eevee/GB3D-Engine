@@ -229,7 +229,7 @@ score += 10
 ui_set_value "Score", score
 ```
 
-## Hardware Window layer (Studio 1.0)
+## Hardware Window layer (Studio 1.1)
 
 HUD elements now render on the Game Boy Window layer instead of into the 3D framebuffer. Element commands mark the Window map dirty and it is rebuilt only when needed.
 
@@ -247,3 +247,8 @@ window_move 0, 112
 ```
 
 The Window always extends from its position toward the bottom-right of the screen, which is a hardware limitation of the Game Boy Window layer.
+
+
+## Fixed Camera Fast Path restrictions
+
+When **Fixed Camera Fast Path** is enabled, Studio bakes static scene geometry and camera orientation at export. The following scene-changing commands are therefore rejected for that export: `move_object`, `set_object_pos`, `spin_object`, `set_object_rot`, `camera_look`, `camera_set_look`, `reset_camera`, plus object-script self commands `move`, `set_pos`, `spin`, and `set_rot`. NPC `move` remains valid because NPCs are hardware sprites rather than baked scene geometry.

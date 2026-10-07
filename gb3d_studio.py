@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import gb3d_core as core
 
-APP_NAME = "GB3D Studio 1.0"
+APP_NAME = "GB3D Studio 1.2"
 
 
 def clamp(v, lo, hi):
@@ -37,6 +37,9 @@ class GB3DStudio:
         self.grid_var = tk.BooleanVar(value=True)
         self.gbc_inset_var = tk.BooleanVar(value=True)
         self.game_camera_var = tk.BooleanVar(value=False)
+        self.fixed_camera_var = tk.BooleanVar(value=False)
+        self.profile_build_var = tk.BooleanVar(value=False)
+        self.sector_culling_var = tk.BooleanVar(value=True)
         self.sky_var = tk.StringVar(value=core.COLOR_NAMES[0])
         self.status_var = tk.StringVar(value="Ready")
         self.perf_status_var = tk.StringVar(value="")
@@ -245,9 +248,42 @@ class GB3DStudio:
         ttk.Button(scene_tab, text="NPCs...", command=self.edit_npcs).grid(row=10, column=0, columnspan=2, sticky="ew", pady=2)
         ttk.Button(scene_tab, text="Window UI...", command=self.edit_ui).grid(row=11, column=0, columnspan=2, sticky="ew", pady=2)
         ttk.Button(scene_tab, text="Performance Report...", command=self.show_performance).grid(row=12, column=0, columnspan=2, sticky="ew", pady=(8,2))
-        ttk.Separator(scene_tab).grid(row=13, column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Checkbutton(
+            scene_tab,
+            text="Fixed Camera Fast Path",
+            variable=self.fixed_camera_var,
+            command=self._on_fixed_camera_changed,
+        ).grid(row=13, column=0, columnspan=2, sticky="w", pady=(8,2))
+        ttk.Label(
+            scene_tab,
+            text="Bakes static world + camera rotation at export. Faster, but game camera yaw/pitch and scene objects must stay fixed.",
+            style="Hint.TLabel", wraplength=245, justify="left"
+        ).grid(row=14, column=0, columnspan=2, sticky="w", pady=(0,5))
+        ttk.Checkbutton(
+            scene_tab,
+            text="Profiler build (START+SELECT)",
+            variable=self.profile_build_var,
+            command=self._on_profile_build_changed,
+        ).grid(row=15, column=0, columnspan=2, sticky="w", pady=(7,2))
+        ttk.Label(
+            scene_tab,
+            text="OFF = release build: profiler code is compiled out. ON = readable hardware-Window profiler.",
+            style="Hint.TLabel", wraplength=245, justify="left"
+        ).grid(row=16, column=0, columnspan=2, sticky="w", pady=(0,5))
+        ttk.Checkbutton(
+            scene_tab,
+            text="Static sector culling",
+            variable=self.sector_culling_var,
+            command=self._on_sector_culling_changed,
+        ).grid(row=17, column=0, columnspan=2, sticky="w", pady=(6,2))
+        ttk.Label(
+            scene_tab,
+            text="Rejects far static objects before any vertex transforms. Disable only when debugging culling.",
+            style="Hint.TLabel", wraplength=245, justify="left"
+        ).grid(row=18, column=0, columnspan=2, sticky="w", pady=(0,5))
+        ttk.Separator(scene_tab).grid(row=19, column=0, columnspan=2, sticky="ew", pady=8)
         self.stats_label = ttk.Label(scene_tab, text="", justify="left")
-        self.stats_label.grid(row=14, column=0, columnspan=2, sticky="w")
+        self.stats_label.grid(row=20, column=0, columnspan=2, sticky="w")
 
         status = ttk.Frame(self.root)
         status.grid(row=2, column=0, sticky="ew")
@@ -273,6 +309,27 @@ class GB3DStudio:
         if not self.game_camera_var.get():
             self.editor_camera = dict(core.effective_camera(self.project))
         self.refresh_camera_label()
+        self.schedule_render()
+
+    def _on_fixed_camera_changed(self):
+        settings = self.project.setdefault("settings", {})
+        settings["fixed_camera_fast"] = bool(self.fixed_camera_var.get())
+        self.set_dirty(True)
+        self.status_var.set("Fixed Camera Fast Path enabled" if self.fixed_camera_var.get() else "Fixed Camera Fast Path disabled")
+        self.schedule_render()
+
+    def _on_profile_build_changed(self):
+        settings = self.project.setdefault("settings", {})
+        settings["profile_build"] = bool(self.profile_build_var.get())
+        self.set_dirty(True)
+        self.status_var.set("Profiler build enabled" if self.profile_build_var.get() else "Release build: profiler compiled out")
+        self.schedule_render()
+
+    def _on_sector_culling_changed(self):
+        settings = self.project.setdefault("settings", {})
+        settings["sector_culling"] = bool(self.sector_culling_var.get())
+        self.set_dirty(True)
+        self.status_var.set("Static sector culling enabled" if self.sector_culling_var.get() else "Static sector culling disabled")
         self.schedule_render()
 
     def _on_canvas_click(self, event):
@@ -348,9 +405,10 @@ class GB3DStudio:
 
     def show_about(self):
         messagebox.showinfo(APP_NAME,
-            "GB3D Studio 1.0\n\n"
+            "GB3D Studio 1.2\n\n"
             "A tiny 3D game engine/editor targeting the Game Boy Color with GBDK.\n\n"
-            "The large viewport is an editor renderer. The GBC inset uses the engine's actual 40x36 logical rendering rules, hardware palette approximation, sprites, and Window UI.",
+            "1.2 adds a corrected quotient/remainder DDA rasterizer, quarter-square fast math, global triangle buckets, native-stride CGB GDMA, and an optional Fixed Camera Fast Path. "
+            "The large viewport is an editor renderer; the GBC inset approximates the actual 40x36 logical output.",
             parent=self.root)
 
     # ------------------------------------------------------------------
@@ -421,6 +479,9 @@ class GB3DStudio:
         try:
             settings = self.project.setdefault("settings", {})
             settings["hardware_palette_preview"] = bool(self.hardware_var.get())
+            settings["fixed_camera_fast"] = bool(self.fixed_camera_var.get())
+            settings["profile_build"] = bool(self.profile_build_var.get())
+            settings["sector_culling"] = bool(self.sector_culling_var.get())
             try:
                 settings["sky_color"] = core.COLOR_NAMES.index(self.sky_var.get())
             except ValueError:
@@ -1136,20 +1197,25 @@ class GB3DStudio:
             f"Vertices potentially transformed: {report['vertices']}",
             f"Triangles potentially tested: {report['faces']}",
             f"Solid colliders: {report['solid']}",
+            f"PC-baked static objects: {report.get('static_baked_objects', 0)} ({report.get('static_baked_vertices', 0)} vertices)",
+            f"Runtime-transform vertices: {report.get('dynamic_vertices', 0)}",
             f"Runtime-rotating objects: {report['dynamic_rotation']}",
             f"NPCs: {report['npcs']}",
             f"UI elements: {report['ui']}",
+            f"Fixed Camera Fast Path: {'ON' if report.get('fixed_camera_fast') else 'OFF'}",
+            f"Static sector culling: {'ON' if self.project.get('settings', {}).get('sector_culling', True) else 'OFF'}",
             f"Rough cost score: {report['cost_score']}",
             "",
-            "1.0 exported ROM profiler:",
-            "Hold START + SELECT to toggle the overlay.",
+            "1.2 exported ROM profiler:",
+            "Enable Profiler build first, then hold START + SELECT to toggle the readable bottom Window overlay.",
             "F = total CPU work, R = 3D scene, U = VRAM upload,",
             "S = scripts, P = physics, T = triangles drawn.",
             "Values are hexadecimal timer ticks; in CGB double-speed 0x0010 ~= 1.95 ms.",
             "",
-            "1.0 keeps the optimized runtime path and hardware Window UI. It culls whole objects",
-            "before vertex transforms, buckets objects instead of sorting them,",
-            "and rejects fully off-screen triangles before backface math.",
+            "1.2 replaces the broken tile-pair experiment with an exact DDA scan converter and keeps CGB General-Purpose DMA for BG maps.",
+            "Immutable object transforms are baked into world vertices on the PC; Fixed Camera Fast Path also removes camera rotation from those static vertices.",
+            "Triangle bucket reset/flush now runs in SM83 assembly instead of a C linked-list/copy loop.",
+            "Whole-object culling and early off-screen triangle rejection remain enabled.",
         ]
         if report['warnings']:
             lines += ["", "Warnings:"] + ["• " + w for w in report['warnings']]
@@ -1552,6 +1618,9 @@ class GB3DStudio:
         self.canvas.create_rectangle(ox, oy, ox+pw, oy+ph, outline="#c1c6cc", width=1, tags="gbc_preview")
 
     def refresh_all(self):
+        self.fixed_camera_var.set(bool(self.project.get("settings", {}).get("fixed_camera_fast", False)))
+        self.profile_build_var.set(bool(self.project.get("settings", {}).get("profile_build", False)))
+        self.sector_culling_var.set(bool(self.project.get("settings", {}).get("sector_culling", True)))
         self.refresh_tree()
         self.refresh_inspector()
         self.schedule_render()
@@ -1615,7 +1684,33 @@ def self_test(base: Path) -> int:
     assert "gb3d_player_get_x()" in scene_text
     assert "player.x" not in scene_text
     assert ", 1u}," in scene_text  # solid object flag
-    print("self-test OK", stats)
+
+    # Compiler-first fixed-camera smoke test: immutable geometry should get
+    # PC-baked world vertices with the locked camera rotation folded in.
+    fixed_project = core.new_project()
+    fixed_project["models"].append(copy.deepcopy(model))
+    fixed_obj = core.make_object(fixed_project["models"][0])
+    fixed_obj["rotation"] = [5, 9]
+    fixed_project["objects"].append(fixed_obj)
+    fixed_project["camera"].update({"yaw": 7, "pitch": -3})
+    fixed_project["settings"]["fixed_camera_fast"] = True
+    fixed_temp = base / "_selftest_fixed_export"
+    if fixed_temp.exists():
+        import shutil
+        shutil.rmtree(fixed_temp)
+    core.export_gbdk(fixed_project, fixed_temp, base / "templates")
+    fixed_scene = (fixed_temp / "scene_gb3d.h").read_text(encoding="utf-8")
+    assert "SCENE_FIXED_CAMERA_FAST 1u" in fixed_scene
+    assert "scene_world_obj_0_" in fixed_scene
+    assert "camera_baked" not in fixed_scene  # field value is positional, not named
+    # Dynamic objects now fall back to the general object-transform path while
+    # the camera orientation remains locked, so spinning an object is legal.
+    fixed_obj["script"] = "@update\nspin 0 1"
+    assert not any("Fixed Camera Fast Path" in e for e in core.validate_for_export(fixed_project))
+    fixed_obj["script"] = "@update\ncamera_look 1 0"
+    assert any("Fixed Camera Fast Path" in e for e in core.validate_for_export(fixed_project))
+
+    print("self-test OK", stats, "fixed-camera OK")
     return 0
 
 

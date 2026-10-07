@@ -1,4 +1,4 @@
-# GB3D project format - v7 / Studio 1.0
+# GB3D project format - v9 / Studio 1.2
 
 `.gb3d` files are human-readable JSON.
 
@@ -17,6 +17,22 @@ npcs
 ui
 ```
 
+## 1.2 runtime settings
+
+`settings.fixed_camera_fast` is a boolean:
+
+```json
+{
+  "fixed_camera_fast": true
+}
+```
+
+When enabled, export creates render-only models whose static object rotation and fixed game-camera orientation are baked on the PC. Logical `objects` remain in normal world coordinates for collision and game state.
+
+Camera position is still dynamic. Camera yaw/pitch and scene-object position/rotation must remain fixed during play; export validation rejects GBScript commands that would invalidate the bake.
+
+The default is `false`, including for upgraded older projects.
+
 ## Window UI settings
 
 `settings.window_ui` controls the hardware Window layer:
@@ -32,56 +48,11 @@ ui
 
 `x` and `y` are physical 160×144 LCD pixel coordinates. The Game Boy Window begins there and extends to the bottom-right of the display.
 
-## UI text
-
-UI element `x`/`y` are **8×8 Window tile coordinates**, range 0..19 and 0..17.
-
-```json
-{
-  "id": "ui_...",
-  "name": "Score",
-  "type": "text",
-  "x": 0,
-  "y": 0,
-  "text": "SCORE",
-  "color": 10,
-  "visible": true,
-  "show_value": true,
-  "value": 0
-}
-```
-
-Text is limited to 18 characters. Values are generated only when the element changes.
-
-## UI bar
-
-```json
-{
-  "id": "ui_...",
-  "name": "Health",
-  "type": "bar",
-  "x": 0,
-  "y": 2,
-  "width": 10,
-  "value": 8,
-  "max": 10,
-  "color": 4,
-  "bg_color": 3,
-  "visible": true
-}
-```
-
-`width` is measured in 8×8 Window tiles, maximum 20.
-
-## NPC
-
-NPCs remain 32×32 hardware metasprites with 1024 palette-index pixels and a four-color sprite palette.
+UI element `x`/`y` are 8×8 Window tile coordinates, range 0..19 and 0..17. NPCs remain 32×32 hardware metasprites.
 
 ## Compatibility
 
-Older projects are upgraded when opened. v0.8 framebuffer-UI coordinates are converted from 4×4 logical pixels to 8×8 Window cells. The new Window defaults to the bottom of the screen; its position can be changed in **UI...**.
+Studio 1.2 reads older project versions and upgrades them to v9. Editor-only camera/navigation state is not exported as game state; the saved `camera` object remains the game/start camera.
 
 
-## Studio 1.0 note
-
-The full-resolution editor camera and world grid are editor-only view state and are not exported into the `.gb3d` scene. The saved `camera` field remains the game/start camera. Studio 1.0 reads older project versions and upgrades them when loaded.
+Studio 1.2 settings include `fixed_camera_fast`, `profile_build`, and `sector_culling`. `profile_build=false` is the release default.
