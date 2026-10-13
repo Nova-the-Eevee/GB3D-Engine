@@ -13,8 +13,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import gb3d_core as core
+import gb3d_gba as gba
+import novapoly_preview as poly_preview
 
-APP_NAME = "GB3D Studio 1.2"
+APP_NAME = "NovaPoly Studio 0.6.3 (GBC + GBA)"
 
 
 def clamp(v, lo, hi):
@@ -25,8 +27,10 @@ class GB3DStudio:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"{APP_NAME} - Untitled")
-        self.root.geometry("1440x860")
-        self.root.minsize(1080, 680)
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        # Leave room for the OS taskbar/dock, particularly on laptop screens.
+        self.root.geometry(f"{min(1440, max(800, sw - 90))}x{min(860, max(520, sh - 110))}")
+        self.root.minsize(800, 520)
 
         self.project = core.new_project()
         self.project_path: Path | None = None
@@ -35,10 +39,18 @@ class GB3DStudio:
         self.wireframe_var = tk.BooleanVar(value=False)
         self.hardware_var = tk.BooleanVar(value=True)
         self.grid_var = tk.BooleanVar(value=True)
-        self.gbc_inset_var = tk.BooleanVar(value=True)
+        self.gbc_inset_var = tk.BooleanVar(value=False)
+        self.gba_inset_var = tk.BooleanVar(value=True)
+        self.display_mode_var = tk.StringVar(value="Textured")
+        self._viewport_image = None
+        self._gba_preview_image = None
+        self._editor_pick_primitives = []
         self.game_camera_var = tk.BooleanVar(value=False)
         self.fixed_camera_var = tk.BooleanVar(value=False)
         self.profile_build_var = tk.BooleanVar(value=False)
+        self.gba_queue_512_var = tk.BooleanVar(value=False)
+        self.texture_max_dimension = 32
+        self.texture_max_colors = 32
         self.sector_culling_var = tk.BooleanVar(value=True)
         self.sky_var = tk.StringVar(value=core.COLOR_NAMES[0])
         self.status_var = tk.StringVar(value="Ready")
@@ -79,8 +91,10 @@ class GB3DStudio:
         file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_project)
         file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
         file_menu.add_separator()
-        file_menu.add_command(label="Import OBJ...", command=self.import_obj)
+        file_menu.add_command(label="Import OBJ / MTL / Textures...", command=self.import_obj)
+        file_menu.add_command(label="Materials & UVs...", command=self.edit_materials)
         file_menu.add_command(label="Export GBDK...", command=self.export_gbdk)
+        file_menu.add_command(label="Export GBA...", command=self.export_gba)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.on_close)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -93,16 +107,31 @@ class GB3DStudio:
         menubar.add_cascade(label="Edit", menu=edit_menu)
 
         game_menu = tk.Menu(menubar, tearoff=False)
+        game_menu.add_command(label="GBA Texture Settings...", command=self.edit_texture_settings)
+        game_menu.add_command(label="Materials & UVs...", command=self.edit_materials)
+        game_menu.add_separator()
         game_menu.add_command(label="Player...", command=self.edit_player_settings)
         game_menu.add_command(label="NPCs...", command=self.edit_npcs)
         game_menu.add_command(label="Window UI...", command=self.edit_ui)
         game_menu.add_separator()
         game_menu.add_command(label="Performance...", command=self.show_performance)
+        game_menu.add_separator()
+        # These options remain accessible even on a very small display.
+        game_menu.add_checkbutton(label="Profiler build (slower; for diagnostics)",
+                                  variable=self.profile_build_var,
+                                  command=self._on_profile_build_changed)
+        game_menu.add_checkbutton(label="GBA benchmark: 512-triangle queue (v0.5 limit)",
+                                  variable=self.gba_queue_512_var,
+                                  command=self._on_gba_queue_changed)
         menubar.add_cascade(label="Game", menu=game_menu)
 
         view_menu = tk.Menu(menubar, tearoff=False)
         view_menu.add_checkbutton(label="World Grid", variable=self.grid_var, command=self.schedule_render)
         view_menu.add_checkbutton(label="Wireframe", variable=self.wireframe_var, command=self.schedule_render)
+        view_menu.add_radiobutton(label="Textured editor viewport", variable=self.display_mode_var, value="Textured", command=self.schedule_render)
+        view_menu.add_radiobutton(label="GBA hardware-style fullscreen", variable=self.display_mode_var, value="GBA", command=self.schedule_render)
+        view_menu.add_separator()
+        view_menu.add_checkbutton(label="GBA preview inset", variable=self.gba_inset_var, command=self.schedule_render)
         view_menu.add_checkbutton(label="GBC Preview Inset", variable=self.gbc_inset_var, command=self.schedule_render)
         view_menu.add_checkbutton(label="Accurate GBC Palette", variable=self.hardware_var, command=self.schedule_render)
         view_menu.add_checkbutton(label="Use Game Camera", variable=self.game_camera_var, command=self._camera_mode_changed)
@@ -112,7 +141,7 @@ class GB3DStudio:
         help_menu.add_command(label="Quick Start", command=self.show_quick_start)
         help_menu.add_command(label="Open User Guide", command=self.open_guide)
         help_menu.add_separator()
-        help_menu.add_command(label="About GB3D Studio", command=self.show_about)
+        help_menu.add_command(label="About NovaPoly Studio", command=self.show_about)
         menubar.add_cascade(label="Help", menu=help_menu)
         self.root.configure(menu=menubar)
 
@@ -122,12 +151,17 @@ class GB3DStudio:
         for text, cmd in [("New", self.new_project), ("Open", self.open_project), ("Save", self.save_project)]:
             ttk.Button(toolbar, text=text, command=cmd, style="Toolbar.TButton").pack(side="left", padx=2)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=7)
-        for text, cmd in [("Import OBJ", self.import_obj), ("Add Instance", self.add_instance), ("Duplicate", self.duplicate_selected), ("Delete", self.delete_selected)]:
+        for text, cmd in [("Import OBJ", self.import_obj), ("Materials", self.edit_materials), ("Add Instance", self.add_instance), ("Duplicate", self.duplicate_selected), ("Delete", self.delete_selected)]:
             ttk.Button(toolbar, text=text, command=cmd, style="Toolbar.TButton").pack(side="left", padx=2)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=7)
+        ttk.Label(toolbar, text="View:").pack(side="left", padx=(2,2))
+        ttk.Combobox(toolbar, state="readonly", width=10, textvariable=self.display_mode_var,
+                     values=["Textured", "GBA"]).pack(side="left", padx=2)
+        self.display_mode_var.trace_add("write", lambda *_: self.schedule_render())
         for text, cmd in [("Player", self.edit_player_settings), ("NPCs", self.edit_npcs), ("Window UI", self.edit_ui)]:
             ttk.Button(toolbar, text=text, command=cmd, style="Toolbar.TButton").pack(side="left", padx=2)
-        ttk.Button(toolbar, text="Export GBDK", command=self.export_gbdk, style="Toolbar.TButton").pack(side="right", padx=2)
+        ttk.Button(toolbar, text="Export GBC", command=self.export_gbdk, style="Toolbar.TButton").pack(side="right", padx=2)
+        ttk.Button(toolbar, text="Export GBA", command=self.export_gba, style="Toolbar.TButton").pack(side="right", padx=2)
 
         main = ttk.Panedwindow(self.root, orient="horizontal")
         main.grid(row=1, column=0, sticky="nsew")
@@ -157,7 +191,7 @@ class GB3DStudio:
         model_buttons = ttk.Frame(left)
         model_buttons.pack(fill="x")
         ttk.Button(model_buttons, text="Import OBJ...", command=self.import_obj).pack(side="left", fill="x", expand=True, padx=(0, 2))
-        ttk.Button(model_buttons, text="Recolor...", command=self.recolor_selected_model).pack(side="left", fill="x", expand=True, padx=(2, 0))
+        ttk.Button(model_buttons, text="Materials...", command=self.edit_materials).pack(side="left", fill="x", expand=True, padx=(2, 0))
         ttk.Label(left, text="Tip: double-click a model to add an instance.", style="Hint.TLabel", wraplength=245).pack(anchor="w", pady=(5, 0))
 
         # ----- full-resolution viewport -----
@@ -186,10 +220,13 @@ class GB3DStudio:
         ttk.Label(right, text="INSPECTOR", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
         notebook = ttk.Notebook(right)
         notebook.pack(fill="both", expand=True)
-        object_tab = ttk.Frame(notebook, padding=9)
-        scene_tab = ttk.Frame(notebook, padding=9)
-        notebook.add(object_tab, text="Object")
-        notebook.add(scene_tab, text="Scene")
+        # Scrollable inspector tabs: previously the lower Scene options
+        # disappeared below the viewport on 720p / high-DPI desktops.
+        object_tab = self._make_scrollable_inspector_tab(notebook, "Object")
+        scene_tab = self._make_scrollable_inspector_tab(notebook, "Scene")
+        self.root.bind_all("<MouseWheel>", self._scroll_inspector, add="+")
+        self.root.bind_all("<Button-4>", self._scroll_inspector, add="+")
+        self.root.bind_all("<Button-5>", self._scroll_inspector, add="+")
 
         self.name_var = tk.StringVar()
         self.model_var = tk.StringVar()
@@ -284,6 +321,18 @@ class GB3DStudio:
         ttk.Separator(scene_tab).grid(row=19, column=0, columnspan=2, sticky="ew", pady=8)
         self.stats_label = ttk.Label(scene_tab, text="", justify="left")
         self.stats_label.grid(row=20, column=0, columnspan=2, sticky="w")
+        ttk.Separator(scene_tab).grid(row=21, column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Checkbutton(
+            scene_tab, text="GBA benchmark: 512-triangle queue",
+            variable=self.gba_queue_512_var,
+            command=self._on_gba_queue_changed,
+        ).grid(row=22, column=0, columnspan=2, sticky="w", pady=(3, 2))
+        ttk.Label(
+            scene_tab,
+            text="Diagnostic ONLY: matches the v0.5 queue limit. May drop visible faces! "
+                 "OFF preserves all 1024 slots. Also available under Game menu.",
+            style="Hint.TLabel", wraplength=245, justify="left",
+        ).grid(row=23, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
         status = ttk.Frame(self.root)
         status.grid(row=2, column=0, sticky="ew")
@@ -292,6 +341,51 @@ class GB3DStudio:
         ttk.Label(status, textvariable=self.perf_status_var, relief="sunken", anchor="e", style="Status.TLabel").grid(row=0, column=1, sticky="e")
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _make_scrollable_inspector_tab(self, notebook, label):
+        """A scrollable tab with an actual visible scrollbar.
+
+        The frame returned is the content frame, so existing inspector .grid()
+        calls require no changes. Only the tab container is a Canvas.
+        """
+        pane = ttk.Frame(notebook)
+        notebook.add(pane, text=label)
+        pane.columnconfigure(0, weight=1)
+        pane.rowconfigure(0, weight=1)
+        viewport = tk.Canvas(pane, highlightthickness=0, borderwidth=0,
+                             background="#f0f0f0", width=265)
+        scrollbar = ttk.Scrollbar(pane, orient="vertical", command=viewport.yview)
+        viewport.configure(yscrollcommand=scrollbar.set)
+        viewport.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        contents = ttk.Frame(viewport, padding=9)
+        window_id = viewport.create_window((0, 0), window=contents, anchor="nw")
+        contents.bind("<Configure>", lambda e, v=viewport:
+                      v.configure(scrollregion=v.bbox("all")))
+        viewport.bind("<Configure>", lambda e, v=viewport, wid=window_id:
+                      v.itemconfigure(wid, width=e.width))
+        if label == "Scene":
+            self.scene_scroll_canvas = viewport
+        else:
+            self.object_scroll_canvas = viewport
+        return contents
+
+    def _scroll_inspector(self, event):
+        # Preserve existing zoom behavior over the 3D editor viewport.
+        widget = self.root.winfo_containing(event.x_root, event.y_root)
+        while widget is not None:
+            if widget in (self.scene_scroll_canvas, self.object_scroll_canvas):
+                if getattr(event, "num", 0) == 4:
+                    steps = -3
+                elif getattr(event, "num", 0) == 5:
+                    steps = 3
+                else:
+                    steps = int(-event.delta / 120)
+                    if not steps and event.delta:
+                        steps = -1 if event.delta > 0 else 1
+                widget.yview_scroll(steps, "units")
+                return "break"
+            widget = getattr(widget, "master", None)
 
     def _bind_keys(self):
         for key in ["w", "a", "s", "d", "W", "A", "S", "D", "q", "e", "Q", "E", "Left", "Right", "Up", "Down"]:
@@ -325,6 +419,13 @@ class GB3DStudio:
         self.status_var.set("Profiler build enabled" if self.profile_build_var.get() else "Release build: profiler compiled out")
         self.schedule_render()
 
+    def _on_gba_queue_changed(self):
+        flag = bool(self.gba_queue_512_var.get())
+        self.project.setdefault("settings", {})["gba_queue_512"] = flag
+        self.set_dirty(True)
+        self.status_var.set("GBA queue: 512-triangle comparison (may drop faces)" if flag
+                            else "GBA queue: full 1024 triangles")
+
     def _on_sector_culling_changed(self):
         settings = self.project.setdefault("settings", {})
         settings["sector_culling"] = bool(self.sector_culling_var.get())
@@ -346,7 +447,25 @@ class GB3DStudio:
                     self.scene_tree.see(oid)
                     self.refresh_inspector()
                     self.schedule_render()
-                break
+                return
+        # The textured viewport is a single composited image. Pick the uppermost
+        # visible triangle by its original full-resolution projected coordinates.
+        x,y=event.x,event.y
+        for prim in reversed(self._editor_pick_primitives):
+            if prim.get('kind') != 'triangle': continue
+            (x0,y0),(x1,y1),(x2,y2)=prim['points']
+            d=(y1-y2)*(x0-x2)+(x2-x1)*(y0-y2)
+            if abs(d)<1e-7: continue
+            a=((y1-y2)*(x-x2)+(x2-x1)*(y-y2))/d
+            b=((y2-y0)*(x-x2)+(x0-x2)*(y-y2))/d
+            if a>=0 and b>=0 and 1-a-b>=0:
+                oid=str(prim.get('object_id',''))
+                if self.scene_tree.exists(oid):
+                    self.selected_object_id=oid
+                    self.scene_tree.selection_set(oid)
+                    self.scene_tree.see(oid)
+                    self.refresh_inspector();self.schedule_render()
+                return
 
     def _on_mousewheel(self, event):
         delta = getattr(event, "delta", 0)
@@ -379,7 +498,8 @@ class GB3DStudio:
 
     def show_quick_start(self):
         messagebox.showinfo(APP_NAME,
-            "1. Import an OBJ model.\n"
+            "1. Import an OBJ model, including Blockbench OBJ exports.\n"
+            "   Select it in MODELS, then Materials... to add/repair textures.\n"
             "2. Double-click it in MODELS or press Add Instance.\n"
             "3. Select geometry in the viewport or hierarchy and edit its transform.\n"
             "4. Use the large viewport for editing; the corner preview is the real GBC look.\n"
@@ -405,8 +525,9 @@ class GB3DStudio:
 
     def show_about(self):
         messagebox.showinfo(APP_NAME,
-            "GB3D Studio 1.2\n\n"
-            "A tiny 3D game engine/editor targeting the Game Boy Color with GBDK.\n\n"
+            "NovaPoly Studio 0.4\n\n"
+            "Cross-platform software 3D engine targeting non-3D consoles.\n"
+            "GBC uses the original renderer; GBA supports multiple UV-mapped image textures.\n\n"
             "1.2 adds a corrected quotient/remainder DDA rasterizer, quarter-square fast math, global triangle buckets, native-stride CGB GDMA, and an optional Fixed Camera Fast Path. "
             "The large viewport is an editor renderer; the GBC inset approximates the actual 40x36 logical output.",
             parent=self.root)
@@ -481,6 +602,7 @@ class GB3DStudio:
             settings["hardware_palette_preview"] = bool(self.hardware_var.get())
             settings["fixed_camera_fast"] = bool(self.fixed_camera_var.get())
             settings["profile_build"] = bool(self.profile_build_var.get())
+            settings["gba_queue_512"] = bool(self.gba_queue_512_var.get())
             settings["sector_culling"] = bool(self.sector_culling_var.get())
             try:
                 settings["sky_color"] = core.COLOR_NAMES.index(self.sky_var.get())
@@ -502,6 +624,32 @@ class GB3DStudio:
         self.project["name"] = self.project_path.stem
         return self.save_project()
 
+    def edit_materials(self):
+        """Texture, material and UV editor for an existing model asset."""
+        try:
+            from novapoly_material_editor import MaterialEditor
+            MaterialEditor(self)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Could not open materials editor:\n{exc}")
+
+    def edit_texture_settings(self):
+        """Image conversion runs once on OBJ import, not every rendered frame."""
+        resolution = simpledialog.askinteger(APP_NAME,
+            "Maximum imported texture dimension (16, 32, 64):",
+            initialvalue=self.texture_max_dimension, minvalue=16,maxvalue=64)
+        if resolution is None:return
+        if resolution not in (16,32,64):
+            messagebox.showerror(APP_NAME,'Choose 16, 32, or 64.');return
+        colors = simpledialog.askinteger(APP_NAME,
+            "Colors per texture (16, 32, 64):",
+            initialvalue=self.texture_max_colors,minvalue=16,maxvalue=64)
+        if colors is None:return
+        if colors not in (16,32,64):
+            messagebox.showerror(APP_NAME,'Choose 16, 32, or 64.');return
+        self.texture_max_dimension=resolution
+        self.texture_max_colors=colors
+        self.status_var.set(f'New OBJ textures: max {resolution}px, {colors} colors')
+
     def import_obj(self):
         path = filedialog.askopenfilename(title="Import OBJ", filetypes=[("Wavefront OBJ", "*.obj"), ("All files", "*.*")])
         if not path:
@@ -511,6 +659,10 @@ class GB3DStudio:
             return
         try:
             model = core.import_obj(path, size, default_color=1)
+            # GBC still uses the original face colors; GBA can additionally
+            # sample multiple diffuse maps in a single mesh.
+            import novapoly_textures
+            novapoly_textures.add_obj_textures(model, path, self.texture_max_dimension, self.texture_max_colors)
             # Avoid duplicate asset names while keeping generated C identifiers sane.
             existing = {m.get("name") for m in self.project.get("models", [])}
             base = model["name"]
@@ -524,7 +676,10 @@ class GB3DStudio:
             self.selected_object_id = obj["id"]
             self.set_dirty(True)
             self.refresh_all()
-            warning = ""
+            warning = f"  | {len(model.get('textures', []))} embedded texture(s)" if model.get('textures') else ""
+            if model.get("import_warnings"):
+                warning += f"  | {len(model['import_warnings'])} missing image(s)"
+                messagebox.showwarning(APP_NAME, "Model imported. Some textures need manual assignment:\n\n" + "\n".join(model["import_warnings"]) + "\n\nOpen Materials... and assign the PNGs.")
             if len(model["vertices"]) > core.MAX_MODEL_VERTICES or len(model["faces"]) > core.MAX_MODEL_FACES:
                 warning = "  ⚠ exceeds current GBC per-model limits"
             self.status_var.set(f"Imported {Path(path).name}: {len(model['vertices'])} vertices, {len(model['faces'])} triangles{warning}")
@@ -1237,6 +1392,21 @@ class GB3DStudio:
         except Exception as exc:
             messagebox.showerror(APP_NAME, str(exc))
 
+    def export_gba(self):
+        path = filedialog.askdirectory(title="Choose GB3D Advance GBA export folder")
+        if not path:
+            return
+        try:
+            files = gba.export_gba(self.project, path)
+            self.status_var.set(f"Exported GB3D Advance to {path}")
+            messagebox.showinfo(APP_NAME,
+                "GB3D Advance export complete!\n\n"
+                "Build with devkitPro gba-dev: run make in the exported folder.\n\n"
+                "Exports 3D, textures, scripts, sprites, HUD and physics.\n\n"
+                + "\n".join(str(p.relative_to(path)) for p in files))
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, str(exc))
+
     # ------------------------------------------------------------------
     # Inspector / hierarchy
     # ------------------------------------------------------------------
@@ -1438,13 +1608,20 @@ class GB3DStudio:
         try:
             primitives, editor_stats = core.editor_scene_primitives(
                 self.project, w, h, camera=camera, wireframe=self.wireframe_var.get())
-            logical, gbc_stats = core.render_scene(self.project, wireframe=self.wireframe_var.get())
-            gbc_pixels = core.hardware_palette_rgb(logical) if self.hardware_var.get() else core.logical_rgb(logical)
+            gbc_stats = {'objects':0,'vertices':0,'faces':0,'drawn':0,'npcs':0,'ui':0}
+            gbc_pixels = None
+            if self.gbc_inset_var.get() and self.display_mode_var.get() != "GBA":
+                logical, gbc_stats = core.render_scene(self.project, wireframe=self.wireframe_var.get())
+                gbc_pixels = core.hardware_palette_rgb(logical) if self.hardware_var.get() else core.logical_rgb(logical)
         except Exception as exc:
             self.status_var.set(f"Render error: {exc}")
             return
 
         self.canvas.delete("all")
+        self._editor_pick_primitives = primitives if self.display_mode_var.get() != "GBA" else []
+        if self.display_mode_var.get() == "GBA":
+            self._render_gba_full_view(w,h,camera)
+            return
         sky_idx = int(self.project.get("settings", {}).get("sky_color", 0)) & 15
         sr, sg, sb = core.LOGICAL_RGB[sky_idx]
         # Make the editor sky a little less harsh without pretending it is GBC output.
@@ -1471,6 +1648,16 @@ class GB3DStudio:
                 if pa is not None and pb is not None:
                     self.canvas.create_line(pa[0], pa[1], pb[0], pb[1], fill=color, width=2, tags="grid")
 
+        # Transparent RGBA software rendering lets the world grid show through.
+        # An image cache avoids a Tk Canvas item per texel (very important!).
+        try:
+            from PIL import ImageTk
+            texture_layer = poly_preview.render_editor_textures(self.project,camera,w,h,primitives)
+            self._viewport_image = ImageTk.PhotoImage(texture_layer, master=self.root)
+            self.canvas.create_image(0,0,image=self._viewport_image,anchor="nw",tags="texture_overlay")
+        except ImportError:
+            self._viewport_image = None
+            self.status_var.set("Install Pillow for textured viewport: pip install pillow")
         selected = self.selected_object_id
         for prim in primitives:
             oid = str(prim.get("object_id", ""))
@@ -1481,7 +1668,9 @@ class GB3DStudio:
                 color = "#%02x%02x%02x" % tuple(prim["color"])
                 outline = "#ffd166" if oid == selected else "#252a31"
                 ow = 2 if oid == selected else 1
-                self.canvas.create_polygon(*flat, fill=color, outline=outline, width=ow, tags=tags)
+                self.canvas.create_polygon(*flat, fill="" if self._viewport_image is not None else color,
+                                           outline=outline if oid == selected else "",
+                                           width=ow, tags=tags)
             else:
                 pa, pb = prim["points"]
                 color = "#ffd166" if oid == selected else "#d8dee9"
@@ -1504,8 +1693,10 @@ class GB3DStudio:
                 self.canvas.create_rectangle(pp[0]-5, pp[1]-5, pp[0]+5, pp[1]+5, fill="#80cbc4", outline="#111", tags="marker")
                 self.canvas.create_text(pp[0]+9, pp[1]-9, text=str(npc.get("name","NPC")), anchor="sw", fill="#e8ecef", tags="marker")
 
-        if self.gbc_inset_var.get():
+        if self.gbc_inset_var.get() and gbc_pixels is not None:
             self._draw_gbc_inset(gbc_pixels, w, h)
+        if self.gba_inset_var.get():
+            self._draw_gba_inset(w,h,camera)
 
         report = core.performance_report(self.project)
         score = int(report.get("cost_score", 0))
@@ -1516,13 +1707,47 @@ class GB3DStudio:
             f"  Vertices: {editor_stats['vertices']}\n"
             f"  Faces tested: {editor_stats['faces']}\n"
             f"  Visible: {editor_stats['drawn']}\n\n"
-            f"GBC preview\n"
+            f"GBC preview (when enabled)\n"
             f"  Objects: {gbc_stats['objects']}\n"
             f"  Vertices: {gbc_stats['vertices']}\n"
             f"  Triangles: {gbc_stats['faces']}\n"
             f"  Drawn: {gbc_stats['drawn']}\n"
             f"  NPCs: {gbc_stats.get('npcs',0)}  UI: {gbc_stats.get('ui',0)}"
         ))
+
+    def _render_gba_full_view(self, w, h, camera):
+        from PIL import ImageTk
+        frame, stats = poly_preview.render_gba(self.project,camera)
+        lcd = poly_preview.gba_lcd_image(frame)
+        # Preserve the physical 240:160 GBA LCD aspect ratio on any window size.
+        scale=min((w-36)/240,(h-65)/160)
+        width=max(1,int(240*scale));height=max(1,int(160*scale))
+        from PIL import Image
+        resample=Image.Resampling.NEAREST
+        self._viewport_image=ImageTk.PhotoImage(lcd.resize((width,height),resample),master=self.root)
+        self.canvas.create_rectangle(0,0,w,h,fill="#111317",outline="")
+        self.canvas.create_image((w-width)/2,(h-height)/2,image=self._viewport_image,anchor="nw")
+        self.canvas.create_text(18,15,anchor="nw",fill="#e9ecef",
+                                text="GBA preview • Mode 5 • 160×128 framebuffer • 200×160 centered on LCD")
+        self.stats_label.configure(text=f"GBA preview\n  Submitted faces: {stats['faces']}\n  Visible: {stats['drawn']}\n  NPCs: {len(self.project.get('npcs',[]))}\n\nCPU software approximation")
+        self.perf_status_var.set("GBA-style preview: affine UVs + RGB555, approximate depth and triangle coverage")
+
+    def _draw_gba_inset(self, canvas_w, canvas_h, camera):
+        from PIL import ImageTk
+        frame,_=poly_preview.render_gba(self.project,camera)
+        lcd=poly_preview.gba_lcd_image(frame)
+        scale=min(1.0,max(0.58,(canvas_w-25)/480))
+        iw=int(240*scale);ih=int(160*scale)
+        if scale!=1.0:
+            from PIL import Image
+            lcd=lcd.resize((iw,ih),Image.Resampling.NEAREST)
+        x=canvas_w-iw-18
+        y=(235 if self.gbc_inset_var.get() else 36)
+        self.canvas.create_rectangle(x-6,y-24,x+iw+6,y+ih+6,
+                                     fill="#0c0e11",outline="#777f89",tags="gba_preview")
+        self.canvas.create_text(x,y-17,text="GBA Mode 5 • textured",anchor="w",fill="#e6e8eb",tags="gba_preview")
+        self._gba_preview_image=ImageTk.PhotoImage(lcd,master=self.root)
+        self.canvas.create_image(x,y,image=self._gba_preview_image,anchor="nw",tags="gba_preview")
 
     def _draw_gbc_inset(self, pixels, canvas_w, canvas_h):
         # One inset pixel equals one real 160x144 LCD pixel whenever space permits.
@@ -1621,6 +1846,7 @@ class GB3DStudio:
         self.fixed_camera_var.set(bool(self.project.get("settings", {}).get("fixed_camera_fast", False)))
         self.profile_build_var.set(bool(self.project.get("settings", {}).get("profile_build", False)))
         self.sector_culling_var.set(bool(self.project.get("settings", {}).get("sector_culling", True)))
+        self.gba_queue_512_var.set(bool(self.project.get("settings", {}).get("gba_queue_512", False)))
         self.refresh_tree()
         self.refresh_inspector()
         self.schedule_render()
@@ -1715,7 +1941,7 @@ def self_test(base: Path) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GB3D Studio - tiny Game Boy Color 3D scene editor")
+    parser = argparse.ArgumentParser(description="NovaPoly Studio - software 3D on hardware without 3D accelerators")
     parser.add_argument("project", nargs="?", help="Optional .gb3d project to open")
     parser.add_argument("--self-test", action="store_true", help="Run a headless import/render/export smoke test")
     args = parser.parse_args()
